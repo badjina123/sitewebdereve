@@ -7,7 +7,15 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 require('dotenv').config();
+
+cloudinary.config({
+  cloud_name: 'dhaale1wl',
+  api_key: '472712879393434',
+  api_secret: '4goy-NbL24dR4KrLSz-eLIgNE00'
+});
 
 const app = express();
 
@@ -29,16 +37,13 @@ app.use(express.json({ limit: '10mb' }));
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
 app.use(limiter);
-
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });
 
 const DATA_DIR = path.join(__dirname, 'data');
 const ARTICLES_FILE = path.join(DATA_DIR, 'articles.json');
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const ENV_FILE = path.join(__dirname, '.env');
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 if (!fs.existsSync(ARTICLES_FILE)) fs.writeFileSync(ARTICLES_FILE, '[]');
 
 const resetCodes = new Map();
@@ -65,33 +70,26 @@ const authenticate = (req, res, next) => {
   }
 };
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
-});
-
-const fileFilter = (req, file, cb) => {
-  const allowedMimes = [
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-    'application/pdf',
-    'application/msword',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'application/vnd.ms-excel',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'text/plain'
-  ];
-  if (allowedMimes.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error('Type de fichier non autorisé'), false);
+const imageStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'bbrs-images',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+    resource_type: 'image'
   }
-};
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
-  fileFilter
 });
+
+const fichierStorage = new CloudinaryStorage({
+  cloudinary,
+  params: async (req, file) => ({
+    folder: 'bbrs-fichiers',
+    resource_type: 'raw',
+    public_id: Date.now() + '-' + file.originalname.replace(/[^a-zA-Z0-9.]/g, '_')
+  })
+});
+
+const uploadImage = multer({ storage: imageStorage, limits: { fileSize: 10 * 1024 * 1024 } });
+const uploadFichier = multer({ storage: fichierStorage, limits: { fileSize: 10 * 1024 * 1024 } });
 
 app.post('/api/login', authLimiter, async (req, res) => {
   try {
@@ -99,12 +97,10 @@ app.post('/api/login', authLimiter, async (req, res) => {
     if (!username || !password) return res.status(400).json({ error: 'Champs manquants' });
     if (username !== process.env.ADMIN_USERNAME) return res.status(401).json({ error: 'Identifiants invalides' });
     let valid = false;
-    if (process.env.ADMIN_PASSWORD_HASH && process.env.ADMIN_PASSWORD_HASH.length > 10) {
+    if (process.env.ADMIN_PASSWORD_HASH && process.env.ADMIN_PASSWORD_HASH.length > 10)
       valid = await bcrypt.compare(password, process.env.ADMIN_PASSWORD_HASH);
-    }
-    if (!valid && process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.length > 0) {
+    if (!valid && process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.length > 0)
       valid = (password === process.env.ADMIN_PASSWORD);
-    }
     if (!valid) return res.status(401).json({ error: 'Identifiants invalides' });
     const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: '24h' });
     res.json({ token, message: 'Connexion reussie' });
@@ -121,8 +117,7 @@ app.post('/api/reset/request', authLimiter, (req, res) => {
     if (email.trim().toLowerCase() !== adminEmail.trim().toLowerCase())
       return res.status(400).json({ error: 'Email non reconnu' });
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expires = Date.now() + 10 * 60 * 1000;
-    resetCodes.set(email.toLowerCase(), { code, expires });
+    resetCodes.set(email.toLowerCase(), { code, expires: Date.now() + 10 * 60 * 1000 });
     res.json({ success: true, code, email });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
@@ -135,10 +130,7 @@ app.post('/api/reset/verify', authLimiter, (req, res) => {
     if (!email || !code) return res.status(400).json({ error: 'Donnees manquantes' });
     const stored = resetCodes.get(email.toLowerCase());
     if (!stored) return res.status(400).json({ error: 'Aucun code demande' });
-    if (Date.now() > stored.expires) {
-      resetCodes.delete(email.toLowerCase());
-      return res.status(400).json({ error: 'Code expire' });
-    }
+    if (Date.now() > stored.expires) { resetCodes.delete(email.toLowerCase()); return res.status(400).json({ error: 'Code expire' }); }
     if (stored.code !== code.trim()) return res.status(400).json({ error: 'Code incorrect' });
     res.json({ success: true });
   } catch (e) {
@@ -152,19 +144,14 @@ app.post('/api/reset/change', authLimiter, async (req, res) => {
     if (!email || !code || !newPassword) return res.status(400).json({ error: 'Donnees manquantes' });
     const stored = resetCodes.get(email.toLowerCase());
     if (!stored) return res.status(400).json({ error: 'Session expiree' });
-    if (Date.now() > stored.expires) {
-      resetCodes.delete(email.toLowerCase());
-      return res.status(400).json({ error: 'Code expire' });
-    }
+    if (Date.now() > stored.expires) { resetCodes.delete(email.toLowerCase()); return res.status(400).json({ error: 'Code expire' }); }
     if (stored.code !== code.trim()) return res.status(400).json({ error: 'Code incorrect' });
     if (newPassword.length < 8) return res.status(400).json({ error: 'Mot de passe trop court' });
     const hash = await bcrypt.hash(newPassword, 12);
     let envContent = fs.readFileSync(ENV_FILE, 'utf8');
-    if (envContent.includes('ADMIN_PASSWORD_HASH=')) {
+    if (envContent.includes('ADMIN_PASSWORD_HASH='))
       envContent = envContent.replace(/ADMIN_PASSWORD_HASH=[^\n]*/g, 'ADMIN_PASSWORD_HASH=' + hash);
-    } else {
-      envContent += '\nADMIN_PASSWORD_HASH=' + hash;
-    }
+    else envContent += '\nADMIN_PASSWORD_HASH=' + hash;
     envContent = envContent.replace(/ADMIN_PASSWORD=[^\n]*/g, 'ADMIN_PASSWORD=');
     fs.writeFileSync(ENV_FILE, envContent);
     process.env.ADMIN_PASSWORD_HASH = hash;
@@ -177,19 +164,13 @@ app.post('/api/reset/change', authLimiter, async (req, res) => {
 });
 
 app.get('/api/articles', (req, res) => {
-  try {
-    res.json(readArticles().filter(a => a.publie));
-  } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
+  try { res.json(readArticles().filter(a => a.publie)); }
+  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 app.get('/api/articles/all', authenticate, (req, res) => {
-  try {
-    res.json(readArticles());
-  } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
+  try { res.json(readArticles()); }
+  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 app.get('/api/articles/:id', (req, res) => {
@@ -197,9 +178,7 @@ app.get('/api/articles/:id', (req, res) => {
     const article = readArticles().find(a => a.id === req.params.id);
     if (!article) return res.status(404).json({ error: 'Article non trouve' });
     res.json(article);
-  } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
+  } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 app.post('/api/articles', authenticate, (req, res) => {
@@ -215,14 +194,12 @@ app.post('/api/articles', authenticate, (req, res) => {
       fichier: req.body.fichier || null,
       publie: req.body.publie || false,
       dateCreation: new Date().toISOString(),
-      dateModification: new Date().toISOString(),
+      dateModification: new Date().toISOString()
     };
     articles.unshift(article);
     writeArticles(articles);
     res.status(201).json(article);
-  } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
+  } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 app.put('/api/articles/:id', authenticate, (req, res) => {
@@ -233,62 +210,34 @@ app.put('/api/articles/:id', authenticate, (req, res) => {
     articles[idx] = { ...articles[idx], ...req.body, dateModification: new Date().toISOString() };
     writeArticles(articles);
     res.json(articles[idx]);
-  } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
+  } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 app.delete('/api/articles/:id', authenticate, (req, res) => {
   try {
     const articles = readArticles();
-    const article = articles.find(a => a.id === req.params.id);
-    if (article) {
-      if (article.image) {
-        const imagePath = path.join(UPLOADS_DIR, path.basename(article.image));
-        if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
-      }
-      if (article.fichier && article.fichier.url) {
-        const fichierPath = path.join(UPLOADS_DIR, path.basename(article.fichier.url));
-        if (fs.existsSync(fichierPath)) fs.unlinkSync(fichierPath);
-      }
-    }
     const filtered = articles.filter(a => a.id !== req.params.id);
     if (filtered.length === articles.length) return res.status(404).json({ error: 'Article non trouve' });
     writeArticles(filtered);
     res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
+  } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
-app.post('/api/upload', authenticate, upload.single('image'), (req, res) => {
+app.post('/api/upload', authenticate, uploadImage.single('image'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Pas de fichier' });
-    res.json({ url: '/uploads/' + req.file.filename });
-  } catch (e) {
-    res.status(500).json({ error: 'Erreur upload' });
-  }
+    res.json({ url: req.file.path });
+  } catch (e) { res.status(500).json({ error: 'Erreur upload' }); }
 });
 
-app.post('/api/upload/fichier', authenticate, upload.single('fichier'), (req, res) => {
+app.post('/api/upload/fichier', authenticate, uploadFichier.single('fichier'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Pas de fichier' });
-    res.json({
-      url: '/uploads/' + req.file.filename,
-      nom: req.file.originalname,
-      mimetype: req.file.mimetype,
-      taille: req.file.size
-    });
-  } catch (e) {
-    res.status(500).json({ error: 'Erreur upload: ' + e.message });
-  }
+    res.json({ url: req.file.path, nom: req.file.originalname, mimetype: req.file.mimetype, taille: req.file.size });
+  } catch (e) { res.status(500).json({ error: 'Erreur upload: ' + e.message }); }
 });
 
-app.use('/uploads', express.static(UPLOADS_DIR));
-
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
+app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log('Serveur BBRS sur port ' + PORT));
