@@ -12,7 +12,19 @@ require('dotenv').config();
 const app = express();
 
 app.use(helmet());
-app.use(cors({ origin: process.env.ALLOWED_ORIGIN || 'http://localhost:3000', credentials: true }));
+app.use(cors({
+  origin: function(origin, callback) {
+    const allowed = [
+      'http://localhost:3000',
+      'https://revesyndie.com',
+      'https://www.revesyndie.com',
+      'https://bespoke-chimera-4cd587.netlify.app'
+    ];
+    if (!origin || allowed.includes(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true
+}));
 app.use(express.json({ limit: '10mb' }));
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
@@ -53,7 +65,6 @@ const authenticate = (req, res, next) => {
   }
 };
 
-// ✅ Storage multer avec filtre PDF + Word + images
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
   filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
@@ -78,7 +89,7 @@ const fileFilter = (req, file, cb) => {
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // ✅ 10MB au lieu de 5MB
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter
 });
 
@@ -201,7 +212,7 @@ app.post('/api/articles', authenticate, (req, res) => {
       extrait: req.body.extrait || '',
       categorie: req.body.categorie || 'General',
       image: req.body.image || '',
-      fichier: req.body.fichier || null, // ✅ Champ fichier (PDF/Word)
+      fichier: req.body.fichier || null,
       publie: req.body.publie || false,
       dateCreation: new Date().toISOString(),
       dateModification: new Date().toISOString(),
@@ -230,7 +241,6 @@ app.put('/api/articles/:id', authenticate, (req, res) => {
 app.delete('/api/articles/:id', authenticate, (req, res) => {
   try {
     const articles = readArticles();
-    // ✅ Supprime aussi le fichier physique si existant
     const article = articles.find(a => a.id === req.params.id);
     if (article) {
       if (article.image) {
@@ -251,7 +261,6 @@ app.delete('/api/articles/:id', authenticate, (req, res) => {
   }
 });
 
-// ✅ Upload image (couverture article)
 app.post('/api/upload', authenticate, upload.single('image'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Pas de fichier' });
@@ -261,7 +270,6 @@ app.post('/api/upload', authenticate, upload.single('image'), (req, res) => {
   }
 });
 
-// ✅ Upload fichier joint (PDF, Word, etc.)
 app.post('/api/upload/fichier', authenticate, upload.single('fichier'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Pas de fichier' });
